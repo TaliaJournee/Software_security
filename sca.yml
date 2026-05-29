@@ -1,0 +1,114 @@
+name: SCA
+
+on:
+  push:
+    branches: [ "**" ]
+  pull_request:
+    branches: [ "**" ]
+  schedule:
+    - cron: '0 6 * * 1'
+  workflow_dispatch:
+
+jobs:
+  sca:
+    name: SCA Dependency Scan
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+      security-events: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Generate root lockfile if missing
+        run: |
+          if [ ! -f package-lock.json ]; then
+            npm install --package-lock-only --ignore-scripts
+          fi
+
+      - name: Generate frontend lockfile if missing
+        working-directory: frontend
+        run: |
+          if [ ! -f package-lock.json ]; then
+            npm install --package-lock-only --ignore-scripts
+          fi
+
+      - name: npm audit (root)
+        id: audit_root
+        continue-on-error: true
+        run: npm audit --audit-level=high
+
+      - name: npm audit (frontend)
+        id: audit_frontend
+        continue-on-error: true
+        working-directory: frontend
+        run: npm audit --audit-level=high
+
+      - name: Run OSV-Scanner
+        id: osv
+        continue-on-error: true
+        uses: google/osv-scanner-action/osv-scanner-action@v1.9.1
+        with:
+          scan-args: |-
+            --format=sarif
+            --output=osv.sarif
+            --lockfile=package-lock.json
+            --lockfile=frontend/package-lock.json
+
+      - name: Trivy scan
+        id: trivy
+        continue-on-error: true
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: fs
+          scan-ref: .
+          format: sarif
+          output: trivy.sarif
+          severity: CRITICAL,HIGH
+          exit-code: '1'
+          ignore-unfixed: true
+
+      - name: Upload OSV SARIF
+        if: always() && hashFiles('osv.sarif') != ''
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: osv.sarif
+          category: osv-scanner
+
+      - name: Upload Trivy SARIF
+        if: always() && hashFiles('trivy.sarif') != ''
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: trivy.sarif
+          category: trivy
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sca-reports
+          path: |
+            osv.sarif
+            trivy.sarif
+          if-no-files-found: ignore
+
+      - name: Gate on scanner results (blocking)
+        if: always()
+        run: |
+          echo "npm audit (root):     ${{ steps.audit_root.outcome }}"
+          echo "npm audit (frontend): ${{ steps.audit_frontend.outcome }}"
+          echo "OSV-Scanner:          ${{ steps.osv.outcome }}"
+          echo "Trivy:                ${{ steps.trivy.outcome }}"
+          if [ "${{ steps.audit_root.outcome }}" = "failure" ] || \
+             [ "${{ steps.audit_frontend.outcome }}" = "failure" ] || \
+             [ "${{ steps.osv.outcome }}" = "failure" ] || \
+             [ "${{ steps.trivy.outcome }}" = "failure" ]; then
+            echo "::error::SCA failed — one or more scanners found vulnerabilities"
+            exit 1
+          fi

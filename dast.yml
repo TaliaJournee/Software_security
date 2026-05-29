@@ -1,0 +1,51 @@
+name: DAST
+
+on:
+  push:
+    branches: [ "**" ]
+  pull_request:
+    branches: [ "**" ]
+  schedule:
+    - cron: '0 6 * * 1'
+  workflow_dispatch:
+
+jobs:
+  zap:
+    name: OWASP ZAP Baseline Scan
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+      issues: write
+      security-events: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Start Juice Shop
+        run: |
+          docker run -d --name juiceshop -p 3000:3000 bkimminich/juice-shop
+          for i in {1..30}; do
+            if curl -sf http://localhost:3000 > /dev/null; then
+              echo "Juice Shop is up"
+              exit 0
+            fi
+            echo "Waiting for Juice Shop... ($i)"
+            sleep 5
+          done
+          echo "Juice Shop did not start in time"
+          docker logs juiceshop
+          exit 1
+
+      - name: ZAP Baseline Scan (blocking)
+        uses: zaproxy/action-baseline@v0.14.0
+        with:
+          target: 'http://localhost:3000'
+          fail_action: true
+          allow_issue_writing: false
+          cmd_options: '-a -j -T 5'
+          artifact_name: zap-baseline-report
+
+      - name: Stop Juice Shop
+        if: always()
+        run: docker rm -f juiceshop || true
